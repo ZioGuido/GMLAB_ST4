@@ -15,10 +15,9 @@
 // Runs on Arduino Leonardo or compatible boards (Atmel ATmega32U4)
 // This sketch requires external libraries:
 // - MIDI
+// - MIDIUSB
 // - MillsTimer
 //
-
-
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Pin definitions
@@ -49,10 +48,12 @@ const char MuxPins[4] = { 18, 19, 20, 21 };
 
 #include <EEPROM.h>
 #include <MIDI.h>
+#include <MIDIUSB.h>
 MIDI_CREATE_DEFAULT_INSTANCE();
 
 #include "MillisTimer.h"  // This library creates a timer with millisecond precision
 MillisTimer ButtonTimer;  // This is used for checking the buttons
+MillisTimer ActivityTimer;  // Used to blink the Activity LED
 
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -63,6 +64,7 @@ char ButtonStatus[4] = { 1, 1, 1, 1 };
 
 // This single variable will be used with bitshift operators so that one or more ports can be on or off
 char PortStatus = 0; 
+char USBPort = 0;
 
 // Unfortunately, due to limited memory, the NoteMemory can only be applied to a single channel
 struct NoteMemory
@@ -77,9 +79,27 @@ NoteMemory SustainPedal[16];
 // FUNCTIONS...
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Called to send events to the USB Midi output (linked to OUT 1)
+void UsbMidiSend(byte b1, byte b2, byte b3)
+{
+  // USB output mirrors MIDI output #1
+  if (!USBPort) return;
+  
+  byte Status  = b1 & 0xF0;
+  byte Channel = b1 & 0x0F;
+  Channel -= 1; // MIDIUSB Library wants channels in range 0~15
+  midiEventPacket_t Event;
+  Event = {Status >> 4, Status | Channel, b2, b3};
+  MidiUSB.sendMIDI(Event);
+  MidiUSB.flush();
+}
+
 // Pass the port variable that can either be the current PortStatus or an arbitrary port
 void SetPort(char port)
 {
+  // Used to enable the USB Midi output linked to OUT 1
+  USBPort = port & 1;
+  
   // Switch ports
   for (int i=0; i<4; i++)
   {
@@ -126,11 +146,16 @@ void CheckButtons()
   }
 }
 
+void ActivityLed()
+{
+  digitalWrite(PIN_LED0, HIGH);
+}
+
 void setup() 
 {
   // Turn on power LED
   pinMode(PIN_LED0, OUTPUT);
-  digitalWrite(PIN_LED0, HIGH);
+  ActivityLed();
 
   // Restore last state
   PortStatus = EEPROM.read(8);
@@ -164,6 +189,10 @@ void setup()
   ButtonTimer.expiredHandler(CheckButtons);
   ButtonTimer.start();
 
+  ActivityTimer.setInterval(10);
+  ActivityTimer.setRepeats(1); // One-shot timer
+  ActivityTimer.expiredHandler(ActivityLed);
+
   // Init the MIDI Library
   MIDI.begin(MIDI_CHANNEL_OMNI);  // Listen to all incoming messages
   MIDI.turnThruOff(); // Turn soft-thru off
@@ -174,6 +203,10 @@ void loop()
   // Read and process incoming MIDI messages
   if (MIDI.read())
   {
+    // Start blinking Activity (Power) LED
+    digitalWrite(PIN_LED0, LOW);
+    ActivityTimer.start();
+
     switch (MIDI.getType())
     {
       case MIDI_STATUS_NOTEON:
@@ -182,6 +215,7 @@ void loop()
         NoteMem[MIDI.getData1()].Port = PortStatus;
         SetPort(PortStatus);
         MIDI.sendNoteOn(MIDI.getData1(), MIDI.getData2(), MIDI.getChannel());
+        UsbMidiSend(MIDI_STATUS_NOTEON | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
         break;
 
       case MIDI_STATUS_NOTEOFF:
@@ -191,6 +225,7 @@ void loop()
           NoteMem[MIDI.getData1()].Status = 0; // reset status
           SetPort(NoteMem[MIDI.getData1()].Port); // set appropriate port (override current setting)
           MIDI.sendNoteOff(MIDI.getData1(), MIDI.getData2(), MIDI.getChannel());
+          UsbMidiSend(MIDI_STATUS_NOTEOFF | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
         }
         break;
 
@@ -204,12 +239,14 @@ void loop()
             SustainPedal[MIDI.getChannel() - 1].Port = PortStatus;
             SetPort(PortStatus);
             MIDI.sendControlChange(64, 127, MIDI.getChannel());
+            UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel(),64, 127);
           }
           else
           {
             SustainPedal[MIDI.getChannel() - 1].Status = 0;
             SetPort(SustainPedal[MIDI.getChannel() - 1].Port);
             MIDI.sendControlChange(64, 0, MIDI.getChannel());
+            UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel(), 64, 0);
           }
           
           break;
@@ -217,26 +254,31 @@ void loop()
         
         SetPort(PortStatus);
         MIDI.sendControlChange(MIDI.getData1(), MIDI.getData2(), MIDI.getChannel());
+        UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
         break;
 
       case MIDI_STATUS_PROGRAMCHANGE:
         SetPort(PortStatus);
         MIDI.sendProgramChange(MIDI.getData1(), MIDI.getChannel());
+        UsbMidiSend(MIDI_STATUS_PROGRAMCHANGE | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
         break;
 
       case MIDI_STATUS_CHANNELPRESSURE:
         SetPort(PortStatus);
         MIDI.sendAfterTouch(MIDI.getData1(), MIDI.getChannel());
+        UsbMidiSend(MIDI_STATUS_CHANNELPRESSURE | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
         break;
 
       case MIDI_STATUS_PITCHBEND:
         SetPort(PortStatus);
         // 14 bit to dec (-8192 ~ 8192), center = 0
         MIDI.sendPitchBend((MIDI.getData1() + (MIDI.getData2() << 7) - 8192), MIDI.getChannel());
+        UsbMidiSend(MIDI_STATUS_PITCHBEND | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
         break;
     }
   }
 
   // Run Timers
   ButtonTimer.run();
+  ActivityTimer.run();
 }
