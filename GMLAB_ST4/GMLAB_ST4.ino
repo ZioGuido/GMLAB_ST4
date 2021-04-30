@@ -10,7 +10,7 @@
 // use the buttons to choose which unit to control.
 //
 // Code by Guido Scognamiglio - www.GenuineSoundware.com
-// Start: Aug 2020 - Last update: Oct 2020
+// Start: Aug 2020 - Last update: Apr 2021
 // 
 // Runs on Arduino Leonardo or compatible boards (Atmel ATmega32U4)
 // This sketch requires external libraries:
@@ -66,10 +66,10 @@ char ButtonStatus[4] = { 1, 1, 1, 1 };
 char PortStatus = 0; 
 char USBPort = 0;
 
-// Unfortunately, due to limited memory, the NoteMemory can only be applied to a single channel
+// Note Memory will store Channel and Port at Note On and reuse them at Note Off
 struct NoteMemory
 {
-  char Status, Port;
+  char Status, Channel, Port;
 };
 NoteMemory NoteMem[128];
 NoteMemory SustainPedal[16];
@@ -79,7 +79,7 @@ NoteMemory SustainPedal[16];
 // FUNCTIONS...
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Called to send events to the USB Midi output (linked to OUT 1)
+// Called to send events to the USB Midi output (linked to OUT 1) // Note: MIDIUSB Library wants channels in range 0~15
 void UsbMidiSend(byte b1, byte b2, byte b3)
 {
   // USB output mirrors MIDI output #1
@@ -87,7 +87,6 @@ void UsbMidiSend(byte b1, byte b2, byte b3)
   
   byte Status  = b1 & 0xF0;
   byte Channel = b1 & 0x0F;
-  Channel -= 1; // MIDIUSB Library wants channels in range 0~15
   midiEventPacket_t Event;
   Event = {Status >> 4, Status | Channel, b2, b3};
   MidiUSB.sendMIDI(Event);
@@ -181,6 +180,7 @@ void setup()
   for (int n=0; n<128; n++) // for each note
   {
     NoteMem[n].Status = 0;
+    NoteMem[n].Channel = 0;
     NoteMem[n].Port = 0;
   }
 
@@ -200,6 +200,22 @@ void setup()
 
 void loop() 
 {
+  /////////////////////////////////////////////////////////////////////////////////////////////////////
+  // Read incoming MIDI messages from USB-MIDI port
+  midiEventPacket_t rx;
+  do {
+    rx = MidiUSB.read();
+    if (rx.header != 0)
+    {
+      int Status  = rx.byte1  & 0xf0; // Event type
+      int Channel = rx.byte1  & 0x0f; //
+
+      // TO DO... (maybe forward USB messages to ports 2, 3 & 4 ?...
+    }
+  } while (rx.header != 0);
+  
+
+  /////////////////////////////////////////////////////////////////////////////////////////////////////
   // Read and process incoming MIDI messages
   if (MIDI.read())
   {
@@ -212,10 +228,11 @@ void loop()
       case MIDI_STATUS_NOTEON:
         // Every time a NoteOn event is received, its status and port must be remembered
         NoteMem[MIDI.getData1()].Status = 1;
+        NoteMem[MIDI.getData1()].Channel = MIDI.getChannel();
         NoteMem[MIDI.getData1()].Port = PortStatus;
         SetPort(PortStatus);
         MIDI.sendNoteOn(MIDI.getData1(), MIDI.getData2(), MIDI.getChannel());
-        UsbMidiSend(MIDI_STATUS_NOTEON | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
+        UsbMidiSend(MIDI_STATUS_NOTEON | MIDI.getChannel() - 1, MIDI.getData1(), MIDI.getData2());
         break;
 
       case MIDI_STATUS_NOTEOFF:
@@ -224,8 +241,8 @@ void loop()
         {
           NoteMem[MIDI.getData1()].Status = 0; // reset status
           SetPort(NoteMem[MIDI.getData1()].Port); // set appropriate port (override current setting)
-          MIDI.sendNoteOff(MIDI.getData1(), MIDI.getData2(), MIDI.getChannel());
-          UsbMidiSend(MIDI_STATUS_NOTEOFF | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
+          MIDI.sendNoteOff(MIDI.getData1(), MIDI.getData2(), NoteMem[MIDI.getData1()].Channel);
+          UsbMidiSend(MIDI_STATUS_NOTEOFF | NoteMem[MIDI.getData1()].Channel - 1, MIDI.getData1(), MIDI.getData2());
         }
         break;
 
@@ -239,14 +256,14 @@ void loop()
             SustainPedal[MIDI.getChannel() - 1].Port = PortStatus;
             SetPort(PortStatus);
             MIDI.sendControlChange(64, 127, MIDI.getChannel());
-            UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel(),64, 127);
+            UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel() - 1,64, 127);
           }
           else
           {
             SustainPedal[MIDI.getChannel() - 1].Status = 0;
             SetPort(SustainPedal[MIDI.getChannel() - 1].Port);
             MIDI.sendControlChange(64, 0, MIDI.getChannel());
-            UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel(), 64, 0);
+            UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel() - 1, 64, 0);
           }
           
           break;
@@ -254,26 +271,26 @@ void loop()
         
         SetPort(PortStatus);
         MIDI.sendControlChange(MIDI.getData1(), MIDI.getData2(), MIDI.getChannel());
-        UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
+        UsbMidiSend(MIDI_STATUS_CONTROLCHANGE | MIDI.getChannel() - 1, MIDI.getData1(), MIDI.getData2());
         break;
 
       case MIDI_STATUS_PROGRAMCHANGE:
         SetPort(PortStatus);
         MIDI.sendProgramChange(MIDI.getData1(), MIDI.getChannel());
-        UsbMidiSend(MIDI_STATUS_PROGRAMCHANGE | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
+        UsbMidiSend(MIDI_STATUS_PROGRAMCHANGE | MIDI.getChannel() - 1, MIDI.getData1(), MIDI.getData2());
         break;
 
       case MIDI_STATUS_CHANNELPRESSURE:
         SetPort(PortStatus);
         MIDI.sendAfterTouch(MIDI.getData1(), MIDI.getChannel());
-        UsbMidiSend(MIDI_STATUS_CHANNELPRESSURE | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
+        UsbMidiSend(MIDI_STATUS_CHANNELPRESSURE | MIDI.getChannel() - 1, MIDI.getData1(), MIDI.getData2());
         break;
 
       case MIDI_STATUS_PITCHBEND:
         SetPort(PortStatus);
         // 14 bit to dec (-8192 ~ 8192), center = 0
         MIDI.sendPitchBend((MIDI.getData1() + (MIDI.getData2() << 7) - 8192), MIDI.getChannel());
-        UsbMidiSend(MIDI_STATUS_PITCHBEND | MIDI.getChannel(), MIDI.getData1(), MIDI.getData2());
+        UsbMidiSend(MIDI_STATUS_PITCHBEND | MIDI.getChannel() - 1, MIDI.getData1(), MIDI.getData2());
         break;
     }
   }
